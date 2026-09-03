@@ -1,0 +1,57 @@
+name: scheduled-task
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: scheduled-task
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private workload repo
+        uses: actions/checkout@v4
+        with:
+          repository: s-mykhailo/gift-market-tracker
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: app
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: app/requirements.txt
+
+      - name: Install dependencies
+        working-directory: app
+        run: pip install -r requirements.txt
+
+      - name: Run one cycle
+        working-directory: app
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          NOTIFY_CHAT_IDS: ${{ secrets.NOTIFY_CHAT_IDS }}
+          PRICE_THRESHOLD_USD: ${{ secrets.PRICE_THRESHOLD_USD }}
+          ENABLE_TONNEL: ${{ secrets.ENABLE_TONNEL }}
+          ENABLE_FRAGMENT: ${{ secrets.ENABLE_FRAGMENT }}
+          ENABLE_PORTALS: ${{ secrets.ENABLE_PORTALS }}
+          FRAGMENT_COLLECTIONS: ${{ secrets.FRAGMENT_COLLECTIONS }}
+          TONNEL_AUTH_DATA: ${{ secrets.TONNEL_AUTH_DATA }}
+          PORTALS_AUTH_DATA: ${{ secrets.PORTALS_AUTH_DATA }}
+        run: python scripts/ci_run.py
+
+      # actions/checkout лишає в app/.git закодований у PRIVATE_REPO_PAT credential
+      # (persist-credentials: true за замовчуванням) — тому git push тут працює без
+      # повторного вбудовування токена в URL вручну.
+      - name: Persist tracker state back to the private repo
+        working-directory: app
+        run: |
+          git config user.name "gift-market-tracker-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet || git commit -m "chore: update tracker state [skip ci]"
+          git push

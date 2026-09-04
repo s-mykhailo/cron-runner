@@ -2,20 +2,30 @@ name: scheduled-task
 
 on:
   schedule:
-    # Навмисно НЕ */5 (00, 05, 10...) — на ці "круглі" позначки триґериться купа чужих
-    # крон-джобів одразу, і GitHub у пікові моменти сам документує затримки/пропуски
-    # запланованих запусків. Зсув на 2 хв (02, 07, 12...) — стандартний обхід цього.
-    - cron: "2-59/5 * * * *"
+    # Резервний "самозцілювач", НЕ основний механізм — перевірено наживо: замість
+    # кожні 5 хв GitHub давав розриви по 1.5-4.5 год (навіть зі зсувом хвилини від
+    # круглих позначок). schedule-триґер на такому короткому інтервалі просто
+    # ненадійний. Основний темп тримає self-chaining через workflow_dispatch
+    # (останній крок нижче) — API-виклик обходить той самий занедбаний scheduler.
+    - cron: "*/20 * * * *"
   workflow_dispatch:
 
 concurrency:
   group: scheduled-task
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
+      - name: Record start time
+        id: start
+        run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout private workload repo
         uses: actions/checkout@v4
         with:
@@ -58,3 +68,18 @@ jobs:
           git add data/
           git diff --cached --quiet || git commit -m "chore: update tracker state [skip ci]"
           git push
+
+      # if: always() — навіть якщо попередній крок впав (мережевий збій в циклі
+      # опитування, конфлікт при push тощо), ланцюжок самозапуску не повинен
+      # обірватись. Без цього одна невдача назавжди зупинила б увесь цикл.
+      - name: Wait out the rest of the ~5-minute cycle, then trigger the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          elapsed=$(( $(date +%s) - ${{ steps.start.outputs.epoch }} ))
+          remaining=$(( 300 - elapsed ))
+          if [ "$remaining" -gt 0 ]; then
+            sleep "$remaining"
+          fi
+          gh workflow run poll.yml -R s-mykhailo/cron-runner --ref main
